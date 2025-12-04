@@ -11,9 +11,12 @@ const path = require('path');
 // Optional: load ABI from path specified in env GENSYN_ABI_PATH
 let contractInterface = null;
 const abiPath = process.env.GENSYN_ABI_PATH;
-if (abiPath) {
+// If no explicit ABI path provided, look for `config/gensyn.abi.json` in repo
+const defaultAbiPath = path.join(process.cwd(), 'config', 'gensyn.abi.json');
+const chosenAbiPath = abiPath || (fs.existsSync(defaultAbiPath) ? defaultAbiPath : null);
+if (chosenAbiPath) {
   try {
-    const full = path.isAbsolute(abiPath) ? abiPath : path.join(process.cwd(), abiPath);
+    const full = path.isAbsolute(chosenAbiPath) ? chosenAbiPath : path.join(process.cwd(), chosenAbiPath);
     if (fs.existsSync(full)) {
       const abi = require(full);
       // ethers Interface constructor
@@ -22,7 +25,7 @@ if (abiPath) {
       contractInterface = new ethers.Interface(abi);
       logger.info({ abiPath: full }, 'NodePulse: Loaded Gensyn ABI for event decoding');
     } else {
-      logger.warn({ abiPath: full }, 'NodePulse: GENSYN_ABI_PATH configured but file not found');
+      logger.warn({ abiPath: full }, 'NodePulse: configured ABI path not found');
     }
   } catch (err) {
     logger.warn({ err }, 'NodePulse: Failed to load ABI for Gensyn');
@@ -37,18 +40,20 @@ if (abiPath) {
 async function fetchLogs(fromBlock, toBlock) {
   if (!provider) throw new Error('No chain provider configured');
 
-  const filter = { address: CONTRACT_ADDRESS || undefined, fromBlock, toBlock };
+  // Max block range per single getLogs call (some providers limit this, e.g. Alchemy Free = 10)
+  const maxRange = parseInt(process.env.CHAIN_LOGS_MAX_BLOCK_RANGE || '10', 10);
 
-  // If we have ABI and event names, compute topics via the interface
+  // Build base filter (topics may be added below)
   const namesEnv = process.env.CHAIN_EVENT_NAMES || '';
   const topicsEnv = process.env.CHAIN_EVENT_TOPICS || '';
 
+  // compute topics if ABI + names provided
+  let baseTopics = null;
   if (contractInterface && namesEnv) {
     const names = namesEnv.split(',').map(s => s.trim()).filter(Boolean);
     const topics = names.map(n => {
       try {
         if (typeof contractInterface.getEventTopic === 'function') return contractInterface.getEventTopic(n);
-        // ethers v6: getEventTopic exists; if not, fallback to eventFragment
         const frag = contractInterface.getEvent(n);
         return contractInterface.getEventTopic(frag);
       } catch (err) {
@@ -56,15 +61,60 @@ async function fetchLogs(fromBlock, toBlock) {
         return null;
       }
     }).filter(Boolean);
-    if (topics.length) filter.topics = topics;
+    if (topics.length) baseTopics = topics;
   } else if (topicsEnv) {
     const topics = topicsEnv.split(',').map(s => s.trim()).filter(Boolean);
-    if (topics.length) filter.topics = topics;
+    if (topics.length) baseTopics = topics;
   }
 
-  logger.info({ filter }, 'NodePulse: fetching logs');
-  const logs = await provider.getLogs(filter);
-  return logs;
+  logger.info({ fromBlock, toBlock, maxRange }, 'NodePulse: fetching logs (will chunk if needed)');
+
+  const results = [];
+  // helper to perform a single getLogs with retries
+  async function singleGetLogs(fb, tb) {
+    const filter = { address: CONTRACT_ADDRESS || undefined, fromBlock: fb, toBlock: tb };
+    if (baseTopics) filter.topics = baseTopics;
+
+    // retry with exponential backoff on transient errors
+    const maxAttempts = 3;
+    let attempt = 0;
+    while (attempt < maxAttempts) {
+      try {
+        const logs = await provider.getLogs(filter);
+        return logs;
+      } catch (err) {
+        attempt += 1;
+        logger.warn({ err, attempt, fb, tb }, 'NodePulse: getLogs failed, retrying');
+        // if last attempt, throw
+        if (attempt >= maxAttempts) throw err;
+        // backoff
+        await new Promise(r => setTimeout(r, 500 * Math.pow(2, attempt)));
+      }
+    }
+    return [];
+  }
+
+  // If range is small, do single call
+  if ((toBlock - fromBlock + 1) <= maxRange) {
+    const logs = await singleGetLogs(fromBlock, toBlock);
+    return logs;
+  }
+
+  // Otherwise split into chunks of maxRange and concat results
+  let start = fromBlock;
+  while (start <= toBlock) {
+    const end = Math.min(start + maxRange - 1, toBlock);
+    try {
+      const part = await singleGetLogs(start, end);
+      if (Array.isArray(part) && part.length) results.push(...part);
+    } catch (err) {
+      // log and continue to next chunk to avoid failing entire sync
+      logger.error({ err, start, end }, 'NodePulse: failed fetching logs for chunk');
+    }
+    start = end + 1;
+  }
+
+  return results;
 }
 
 async function decodeLog(log) {

@@ -33,25 +33,12 @@ async function processRange(fromBlock, toBlock) {
       }
 
       if (decoded && decoded.name) {
-        // Example handling: depending on event name, map to job or payout
-        const name = decoded.name;
-        const args = decoded.args || {};
-        logger.debug({ name, args }, 'NodePulse: decoded event');
-
-        if (/payout|reward/i.test(name)) {
-          // Expect args: recipient, amount
-          const recipient = args.recipient || args.to || args.wallet || '0x0';
-          const amount = args.amount || args.value || '0';
-          await payoutService.upsertPayout({ payoutId: log.transactionHash, recipient, amount: amount.toString(), blockNumber: log.blockNumber, txHash: log.transactionHash, timestamp: await chainService.getBlockTimestamp(log.blockNumber) });
-        } else if (/job/i.test(name)) {
-          // Map job event
-          const jobId = args.jobId || args.id || null;
-          const nodeWallet = args.node || args.operator || args.wallet || null;
-          const reward = args.reward || args.amount || '0';
-          await jobService.upsertJob({ jobId, jobType: name, nodeWallet, rewardAmount: reward.toString(), txHash: log.transactionHash, blockNumber: log.blockNumber, timestamp: await chainService.getBlockTimestamp(log.blockNumber) });
-        } else {
-          // Generic fallback: try to upsert as payout if topics indicate transfer
-          logger.debug({ name }, 'NodePulse: unhandled event name');
+        // Delegate mapping to chainEventMapper
+        const mapper = require('../services/chainEventMapper');
+        try {
+          await mapper.mapAndHandle(decoded, log);
+        } catch (err) {
+          logger.warn({ err, decoded }, 'NodePulse: mapper failed to handle decoded event');
         }
       } else {
         // No ABI or couldn't decode: create placeholder payout record with unknown recipient

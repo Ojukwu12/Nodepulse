@@ -18,6 +18,11 @@ async function start() {
     if (process.env.NODE_ENV === 'production') {
       if (!process.env.MONGO_URI) throw new Error('MONGO_URI required in production');
       if (!process.env.JWT_SECRET) throw new Error('JWT_SECRET required in production');
+      if (!process.env.SIDECAR_KEY_SECRET) throw new Error('SIDECAR_KEY_SECRET required in production');
+      // warn if CHAIN_RPC_URL is missing (chain features will be disabled)
+      if (!process.env.CHAIN_RPC_URL) {
+        logger.warn('CHAIN_RPC_URL not configured; chain features will be disabled in production');
+      }
     }
 
     await connectDB();

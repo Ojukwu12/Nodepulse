@@ -172,6 +172,18 @@ Expected response: array of payout documents
 ## ABI & Chain decoding (fetching via Alchemy)
 - To fetch the ABI programmatically using Alchemy, set `CHAIN_RPC_URL` to your Alchemy RPC URL (it contains the API key). NodePulse can then fetch the ABI (or you can place ABI JSON at `config/gensyn.abi.json` and set `GENSYN_ABI_PATH`).
 
+### Automatic ABI fetch
+
+NodePulse includes a helper script `scripts/fetch-abi.js` that attempts to fetch the contract ABI via the provided Alchemy RPC URL using the `alchemy_getContractMetadata` JSON-RPC method. To use it:
+
+```bash
+export CHAIN_RPC_URL="https://gensyn-testnet.g.alchemy.com/v2/<KEY>"
+export CHAIN_CONTRACT_ADDRESS="0x69C6e1D608ec64885E7b185d39b04B491a71768C"
+node scripts/fetch-abi.js
+```
+
+The script will write `config/gensyn.abi.json`. Do NOT commit your RPC URL or API key.
+
 ## Testing chain decoding locally
 1. Place ABI at `config/gensyn.abi.json` or set `GENSYN_ABI_PATH` env var.
 2. Configure `CHAIN_EVENT_NAMES=JobCompleted,RewardPaid` and `CHAIN_RPC_URL` to point to Alchemy.
